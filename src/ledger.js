@@ -77,36 +77,71 @@ export const ledger = {
     });
   },
 
-  async getCumulative(addr) {
-    const { rows } = await db.query(
-      "SELECT withdraw_cumulative FROM players WHERE address = $1",
-      [lc(addr)]
-    );
-    return rows.length ? num(rows[0].withdraw_cumulative) : 0;
+  // Reconcilia el saldo contra los retiros YA EJECUTADOS on-chain. Si el contrato
+  // registra más retirado de lo que ya descontamos, descuenta esa diferencia ahora.
+  // Así el saldo baja SOLO cuando el retiro realmente ocurrió en la blockchain.
+  // Devuelve el saldo actualizado.
+  async reconcile(addr, onchainWithdrawn) {
+    const a = lc(addr);
+    const onchain = r6(onchainWithdrawn);
+    return db.tx(async (client) => {
+      const { rows } = await client.query(
+        "SELECT balance, reflected_withdrawn FROM players WHERE address = $1 FOR UPDATE",
+        [a]
+      );
+      if (!rows.length) return 0;
+      const balance = num(rows[0].balance);
+      const reflected = num(rows[0].reflected_withdrawn);
+      if (onchain <= reflected) return balance;
+      const delta = r6(onchain - reflected);
+      const newBalance = Math.max(0, r6(balance - delta));
+      await client.query(
+        `UPDATE players SET balance = $2, reflected_withdrawn = $3, updated_at = now() WHERE address = $1`,
+        [a, newBalance, onchain]
+      );
+      return newBalance;
+    });
   },
 
-  // Reserva un retiro de forma ATÓMICA: descuenta saldo, sube el cumulative y el nonce
-  // en una sola transacción con bloqueo de fila. Devuelve { cumulative, nonce } o null
-  // si el saldo es insuficiente.
-  async reserveWithdraw(addr, amount) {
+  // Autoriza un retiro: NO descuenta el saldo (eso pasa cuando se confirma on-chain vía
+  // reconcile). Primero reconcilia contra el retirado on-chain, valida saldo suficiente,
+  // y firma un cumulative = retirado_on_chain + monto. Anti-replay: el contrato solo paga
+  // (cumulative - retirado_on_chain), y el cumulative nunca supera retirado + saldo.
+  // Devuelve { cumulative, nonce } o null si el saldo no alcanza.
+  async authorizeWithdraw(addr, amount, onchainWithdrawn) {
     const a = lc(addr);
     const amt = r6(amount);
+    const onchain = r6(onchainWithdrawn);
     if (!(amt > 0)) return null;
     return db.tx(async (client) => {
       const { rows } = await client.query(
-        "SELECT balance, withdraw_cumulative, withdraw_nonce FROM players WHERE address = $1 FOR UPDATE",
+        "SELECT balance, reflected_withdrawn, withdraw_nonce FROM players WHERE address = $1 FOR UPDATE",
         [a]
       );
       if (!rows.length) return null;
-      const balance = num(rows[0].balance);
-      if (balance < amt) return null;
-      const cumulative = r6(num(rows[0].withdraw_cumulative) + amt);
+      let balance = num(rows[0].balance);
+      const reflected = num(rows[0].reflected_withdrawn);
+      // Reconciliar primero: si on-chain ya retiró más de lo reflejado, descontar.
+      if (onchain > reflected) {
+        const delta = r6(onchain - reflected);
+        balance = Math.max(0, r6(balance - delta));
+      }
+      if (balance < amt) {
+        // Persistir la reconciliación aunque no alcance, para no repetir el descuento.
+        if (onchain > reflected) {
+          await client.query(
+            `UPDATE players SET balance = $2, reflected_withdrawn = $3, updated_at = now() WHERE address = $1`,
+            [a, balance, onchain]
+          );
+        }
+        return null;
+      }
+      const cumulative = r6(onchain + amt);
       const nonce = Number(rows[0].withdraw_nonce) + 1;
+      // Guardamos la reconciliación y el nonce; el saldo NO se descuenta todavía.
       await client.query(
-        `UPDATE players
-           SET balance = balance - $2, withdraw_cumulative = $3, withdraw_nonce = $4, updated_at = now()
-         WHERE address = $1`,
-        [a, amt, cumulative, nonce]
+        `UPDATE players SET balance = $2, reflected_withdrawn = $3, withdraw_nonce = $4, updated_at = now() WHERE address = $1`,
+        [a, balance, onchain, nonce]
       );
       return { cumulative, nonce };
     });

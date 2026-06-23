@@ -47,20 +47,36 @@ async function main() {
   assert.equal(await ledger.getBalance(A), 320);
   ok("syncDeposit acredita solo el delta, sin duplicar");
 
-  // 6) reserveWithdraw: descuenta saldo y sube cumulative + nonce atómicamente
-  const r1 = await ledger.reserveWithdraw(A, 100);
+  // 6) authorizeWithdraw NO descuenta el saldo (saldo en 320 desde test 5).
+  //    El descuento ocurre recién al reconciliar contra el retiro on-chain.
+  const r1 = await ledger.authorizeWithdraw(A, 100, 0); // onchainWithdrawn = 0
   assert.deepEqual(r1, { cumulative: 100, nonce: 1 });
-  assert.equal(await ledger.getBalance(A), 220);
-  const r2 = await ledger.reserveWithdraw(A, 50);
-  assert.deepEqual(r2, { cumulative: 150, nonce: 2 }); // cumulative monótono
-  assert.equal(await ledger.getBalance(A), 170);
-  ok("reserveWithdraw: cumulative monótono + nonce incremental");
+  assert.equal(await ledger.getBalance(A), 320, "autorizar NO debe descontar el saldo");
+  ok("authorizeWithdraw firma sin descontar (el dinero no 'desaparece')");
 
-  // 7) reserveWithdraw rechaza si no hay saldo
-  const r3 = await ledger.reserveWithdraw(A, 9999);
+  // 7) al confirmarse on-chain (reconcile), recién ahí baja el saldo
+  const b1 = await ledger.reconcile(A, 100); // el contrato ya pagó 100
+  assert.equal(b1, 220);
+  assert.equal(await ledger.getBalance(A), 220);
+  ok("reconcile descuenta solo cuando el retiro se confirmó on-chain");
+
+  // 8) segundo retiro: cumulative monótono (= retirado_on_chain + monto) + nonce sube
+  const r2 = await ledger.authorizeWithdraw(A, 50, 100);
+  assert.deepEqual(r2, { cumulative: 150, nonce: 2 });
+  await ledger.reconcile(A, 150);
+  assert.equal(await ledger.getBalance(A), 170);
+  ok("cumulative monótono + nonce incremental");
+
+  // 9) reconcile repetido con el mismo on-chain NO vuelve a descontar (anti doble-descuento)
+  const b2 = await ledger.reconcile(A, 150);
+  assert.equal(b2, 170);
+  ok("reconcile idempotente (no descuenta dos veces el mismo retiro)");
+
+  // 10) authorizeWithdraw rechaza si no alcanza el saldo
+  const r3 = await ledger.authorizeWithdraw(A, 9999, 150);
   assert.equal(r3, null);
   assert.equal(await ledger.getBalance(A), 170);
-  ok("reserveWithdraw rechaza si no alcanza el saldo");
+  ok("authorizeWithdraw rechaza si no alcanza el saldo");
 
   // 8) decimales: el redondeo a 6 decimales no rompe la contabilidad
   await ledger.credit(A, 0.111111);

@@ -59,5 +59,17 @@ export async function initDb(poolOverride) {
       CONSTRAINT balance_non_negative CHECK (balance >= 0)
     );
   `);
+  // Migración: columna que registra cuánto retiro on-chain ya descontamos del saldo.
+  // Permite descontar el saldo SOLO cuando el retiro se confirmó en la blockchain.
+  await db.pool.query(
+    `ALTER TABLE players ADD COLUMN IF NOT EXISTS reflected_withdrawn NUMERIC(38,6) NOT NULL DEFAULT 0;`
+  );
+
+  // Wipe opcional del ledger (para empezar limpio). Poné WIPE_LEDGER=true UNA vez,
+  // redeployá, y después volvé a ponerlo en false. ⚠ Borra TODOS los saldos.
+  if (String(process.env.WIPE_LEDGER || "").toLowerCase() === "true") {
+    await db.pool.query("TRUNCATE players;");
+    console.log("⚠ WIPE_LEDGER=true → tabla players vaciada. Acordate de poner WIPE_LEDGER=false.");
+  }
   return db.pool;
 }

@@ -29,6 +29,13 @@ export async function readDeposited(address) {
   return Number(raw) / SCALE;
 }
 
+// Lee cuánto ha retirado on-chain un usuario (acumulado). Fuente de verdad para
+// descontar el saldo de juego SOLO cuando el retiro realmente se ejecutó en la blockchain.
+export async function readWithdrawn(address) {
+  const raw = await bank.read.withdrawn([address]);
+  return Number(raw) / SCALE;
+}
+
 // Verifica que el operator del contrato coincide con nuestra clave
 export async function checkOperator() {
   const onchain = await bank.read.operator();

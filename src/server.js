@@ -7,7 +7,7 @@ import { config } from "./config.js";
 import { ledger } from "./ledger.js";
 import { initDb } from "./db.js";
 import { GameEngine } from "./gameEngine.js";
-import { readDeposited, signWithdraw, checkOperator, operator } from "./signer.js";
+import { readDeposited, readWithdrawn, signWithdraw, checkOperator, operator } from "./signer.js";
 import { issueNonce, verifyLogin, resolveSession, requireAuth, startAuthGc } from "./auth.js";
 
 const app = express();
@@ -42,7 +42,7 @@ wss.on("connection", (ws) => {
         return;
       }
       ws.address = address;
-      ws.send(JSON.stringify({ type: "balance", balance: await ledger.getBalance(ws.address) }));
+      ws.send(JSON.stringify({ type: "balance", balance: await freshBalance(ws.address) }));
       return;
     }
     if (!ws.address) {
@@ -105,10 +105,21 @@ app.post("/sync-deposit", requireAuth, async (req, res) => {
   }
 });
 
+// Saldo de juego reconciliado contra los retiros ya confirmados on-chain.
+// Si la lectura on-chain falla, cae al saldo guardado (no rompe la UI).
+async function freshBalance(address) {
+  try {
+    const onchainWithdrawn = await readWithdrawn(address);
+    return await ledger.reconcile(address, onchainWithdrawn);
+  } catch {
+    return ledger.getBalance(address);
+  }
+}
+
 // Consulta de saldo de juego (solo el propio, autenticado).
 app.get("/balance", requireAuth, async (req, res) => {
   try {
-    res.json({ balance: await ledger.getBalance(req.address) });
+    res.json({ balance: await freshBalance(req.address) });
   } catch (e) {
     res.status(500).json({ error: String(e.message || e) });
   }
@@ -122,8 +133,10 @@ app.post("/withdraw-auth", requireAuth, async (req, res) => {
     const amt = Number(req.body?.amount);
     if (!(amt > 0)) return res.status(400).json({ error: "amount requerido" });
 
-    // Reserva atómica: descuenta saldo y sube cumulative + nonce en una sola transacción.
-    const reservation = await ledger.reserveWithdraw(req.address, amt);
+    // Firma el retiro SIN descontar el saldo (se descuenta al confirmarse on-chain).
+    // cumulative = retirado_on_chain + monto; el contrato paga la diferencia.
+    const onchainWithdrawn = await readWithdrawn(req.address);
+    const reservation = await ledger.authorizeWithdraw(req.address, amt, onchainWithdrawn);
     if (!reservation) return res.status(400).json({ error: "Saldo insuficiente" });
 
     const sig = await signWithdraw(req.address, reservation.cumulative, reservation.nonce);

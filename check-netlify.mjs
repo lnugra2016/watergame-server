@@ -1,0 +1,11 @@
+const url = "https://watergamecrashgame.netlify.app/wg-live-net.js?t=" + Date.now();
+const t = await (await fetch(url)).text();
+const m = (re) => (t.match(re) || [])[1];
+const bank = m(/bank:\s*"(0x[0-9a-fA-F]+)"/);
+const chain = m(/chainIdHex:\s*"(0x[0-9a-fA-F]+)"/);
+const server = m(/serverHttp:\s*"([^"]+)"/);
+console.log("bank en Netlify:", bank);
+console.log("chainIdHex:     ", chain);
+console.log("serverHttp:     ", server);
+const ok = bank && bank.toLowerCase() === "0xa0499cf9864f4375728e1ec24de159ab9357e05f" && chain === "0x89";
+console.log(ok ? "\n✅ Netlify YA tiene la versión mainnet" : "\n⚠️ Netlify TODAVÍA tiene la versión vieja — hay que publicar");
