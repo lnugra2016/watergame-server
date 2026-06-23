@@ -99,24 +99,41 @@ export class GameEngine {
   }
 
   // ---- acciones del jugador ----
-  placeBet(address, amount) {
+  async placeBet(address, amount) {
+    const a = address.toLowerCase();
     if (this.phase !== "waiting") return { ok: false, error: "Apuestas cerradas" };
-    if (this.bets.has(address.toLowerCase())) return { ok: false, error: "Ya apostaste" };
-    if (amount <= 0) return { ok: false, error: "Monto inválido" };
-    if (!ledger.debit(address, amount)) return { ok: false, error: "Saldo insuficiente" };
-    this.bets.set(address.toLowerCase(), { amount, cashedAt: null });
-    return { ok: true, balance: ledger.getBalance(address) };
+    if (this.bets.has(a)) return { ok: false, error: "Ya apostaste" };
+    if (!(amount > 0)) return { ok: false, error: "Monto inválido" };
+
+    // Reserva el slot ANTES del await: bloquea una segunda apuesta concurrente del
+    // mismo jugador mientras esperamos a la base de datos.
+    this.bets.set(a, { amount, cashedAt: null, pending: true });
+    const ok = await ledger.debit(a, amount);
+    if (!ok) {
+      this.bets.delete(a);
+      return { ok: false, error: "Saldo insuficiente" };
+    }
+    // Si la ronda terminó durante el await (el mapa se reinició), devolvemos el dinero.
+    const bet = this.bets.get(a);
+    if (!bet) {
+      await ledger.credit(a, amount);
+      return { ok: false, error: "La ronda terminó, apuesta no registrada" };
+    }
+    bet.pending = false;
+    return { ok: true, balance: await ledger.getBalance(a) };
   }
 
-  cashout(address) {
+  async cashout(address) {
+    const a = address.toLowerCase();
     if (this.phase !== "flying") return { ok: false, error: "No hay ronda activa" };
-    const bet = this.bets.get(address.toLowerCase());
-    if (!bet || bet.cashedAt) return { ok: false, error: "Sin apuesta activa" };
+    const bet = this.bets.get(a);
+    if (!bet || bet.cashedAt || bet.pending) return { ok: false, error: "Sin apuesta activa" };
     const m = this.multiplier;
     if (m >= this.crashAt) return { ok: false, error: "Demasiado tarde" };
+    // Marca cobrado ANTES del await: evita doble cash-out por mensajes concurrentes.
     bet.cashedAt = m;
     const payout = bet.amount * m;
-    ledger.credit(address, payout);
-    return { ok: true, multiplier: Number(m.toFixed(2)), payout, balance: ledger.getBalance(address) };
+    const balance = await ledger.credit(a, payout);
+    return { ok: true, multiplier: Number(m.toFixed(2)), payout, balance };
   }
 }

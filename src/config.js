@@ -17,6 +17,12 @@ export const config = {
   bankAddress: req("BANK_ADDRESS"),
   tokenAddress: req("TOKEN_ADDRESS"),
   operatorKey: req("OPERATOR_PRIVATE_KEY"),
+  databaseUrl: req("DATABASE_URL"),
+  // SSL para Postgres gestionado (Railway/Render/Neon/Supabase). Local: déjalo en false.
+  dbSsl: String(process.env.DB_SSL || "false").toLowerCase() === "true",
+  // Dominio esperado en el login SIWE (anti-phishing). Ej: "watergame.netlify.app".
+  // Si se deja vacío no se valida el dominio (recomendado configurarlo en producción).
+  siweDomain: process.env.SIWE_DOMAIN || "",
   port: Number(process.env.PORT || 8787),
   decimals: Number(process.env.TOKEN_DECIMALS || 6),
 };

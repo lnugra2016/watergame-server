@@ -5,8 +5,10 @@ import { createServer } from "node:http";
 import { WebSocketServer } from "ws";
 import { config } from "./config.js";
 import { ledger } from "./ledger.js";
+import { initDb } from "./db.js";
 import { GameEngine } from "./gameEngine.js";
 import { readDeposited, signWithdraw, checkOperator, operator } from "./signer.js";
+import { issueNonce, verifyLogin, resolveSession, requireAuth, startAuthGc } from "./auth.js";
 
 const app = express();
 app.use(cors());
@@ -23,18 +25,24 @@ function broadcast(msg) {
 
 const game = new GameEngine(broadcast);
 
-// ---- WebSocket: cada cliente se autentica con su address y juega ----
+// ---- WebSocket: cada cliente se autentica con su token de sesión SIWE y juega ----
 wss.on("connection", (ws) => {
   ws.address = null;
   ws.send(JSON.stringify(game.state()));
 
-  ws.on("message", (raw) => {
+  ws.on("message", async (raw) => {
     let m;
     try { m = JSON.parse(raw.toString()); } catch { return; }
 
-    if (m.type === "auth" && m.address) {
-      ws.address = String(m.address).toLowerCase();
-      ws.send(JSON.stringify({ type: "balance", balance: ledger.getBalance(ws.address) }));
+    if (m.type === "auth") {
+      // Solo se acepta un token de sesión obtenido vía /siwe/verify. Nada de address suelta.
+      const address = resolveSession(m.token);
+      if (!address) {
+        ws.send(JSON.stringify({ type: "error", error: "Sesión inválida, inicia sesión con tu wallet" }));
+        return;
+      }
+      ws.address = address;
+      ws.send(JSON.stringify({ type: "balance", balance: await ledger.getBalance(ws.address) }));
       return;
     }
     if (!ws.address) {
@@ -42,18 +50,15 @@ wss.on("connection", (ws) => {
       return;
     }
     if (m.type === "bet") {
-      const r = game.placeBet(ws.address, Number(m.amount));
+      const r = await game.placeBet(ws.address, Number(m.amount));
       ws.send(JSON.stringify({ type: "betAck", ...r }));
     }
     if (m.type === "cashout") {
-      const r = game.cashout(ws.address);
+      const r = await game.cashout(ws.address);
       ws.send(JSON.stringify({ type: "cashoutAck", ...r }));
     }
   });
 });
-
-// envía saldo actualizado tras cada crash (por si cambió)
-const origBroadcast = broadcast;
 
 // ---- REST ----
 
@@ -71,39 +76,57 @@ app.get("/", (_req, res) => {
   });
 });
 
-// Sincroniza un depósito on-chain → acredita saldo de juego
-// El frontend llama esto después de que el usuario hace deposit() en el contrato.
-app.post("/sync-deposit", async (req, res) => {
+// ---- SIWE (login con wallet) ----
+
+// 1) El cliente pide un nonce de un solo uso.
+app.get("/siwe/nonce", (_req, res) => {
+  res.json({ nonce: issueNonce() });
+});
+
+// 2) El cliente firma el mensaje SIWE y lo manda; devolvemos un token de sesión.
+app.post("/siwe/verify", async (req, res) => {
   try {
-    const { address } = req.body;
-    if (!address) return res.status(400).json({ error: "address requerida" });
-    const onchain = await readDeposited(address);
-    const credited = ledger.syncDeposit(address, onchain);
-    res.json({ ok: true, credited, balance: ledger.getBalance(address) });
+    const { message, signature } = req.body;
+    const session = await verifyLogin({ message, signature });
+    res.json({ ok: true, ...session });
+  } catch (e) {
+    res.status(401).json({ ok: false, error: String(e.message || e) });
+  }
+});
+
+// Sincroniza un depósito on-chain → acredita saldo de juego del jugador AUTENTICADO.
+app.post("/sync-deposit", requireAuth, async (req, res) => {
+  try {
+    const onchain = await readDeposited(req.address);
+    const credited = await ledger.syncDeposit(req.address, onchain);
+    res.json({ ok: true, credited, balance: await ledger.getBalance(req.address) });
   } catch (e) {
     res.status(500).json({ error: String(e.message || e) });
   }
 });
 
-// Consulta de saldo de juego
-app.get("/balance/:address", (req, res) => {
-  res.json({ balance: ledger.getBalance(req.params.address) });
+// Consulta de saldo de juego (solo el propio, autenticado).
+app.get("/balance", requireAuth, async (req, res) => {
+  try {
+    res.json({ balance: await ledger.getBalance(req.address) });
+  } catch (e) {
+    res.status(500).json({ error: String(e.message || e) });
+  }
 });
 
 // Pide autorización de retiro: el servidor firma EIP-712 el saldo retirable.
-// Body: { address, amount }  -> retira `amount` del saldo de juego.
-app.post("/withdraw-auth", async (req, res) => {
+// La dirección sale de la sesión SIWE, NUNCA del body (si no, se podría drenar a otros).
+// Body: { amount }
+app.post("/withdraw-auth", requireAuth, async (req, res) => {
   try {
-    const { address, amount } = req.body;
-    const amt = Number(amount);
-    if (!address || !(amt > 0)) return res.status(400).json({ error: "address y amount requeridos" });
-    if (ledger.getBalance(address) < amt) return res.status(400).json({ error: "Saldo insuficiente" });
+    const amt = Number(req.body?.amount);
+    if (!(amt > 0)) return res.status(400).json({ error: "amount requerido" });
 
-    const cumulative = ledger.reserveWithdraw(address, amt);
-    if (cumulative == null) return res.status(400).json({ error: "No se pudo reservar" });
+    // Reserva atómica: descuenta saldo y sube cumulative + nonce en una sola transacción.
+    const reservation = await ledger.reserveWithdraw(req.address, amt);
+    if (!reservation) return res.status(400).json({ error: "Saldo insuficiente" });
 
-    const nonce = ledger.nextNonce(address);
-    const sig = await signWithdraw(address, cumulative, nonce);
+    const sig = await signWithdraw(req.address, reservation.cumulative, reservation.nonce);
     res.json({
       ok: true,
       // el frontend llama contract.withdraw(cumulative, nonce, expiry, signature)
@@ -111,7 +134,7 @@ app.post("/withdraw-auth", async (req, res) => {
       nonce: sig.nonce,
       expiry: sig.expiry,
       signature: sig.signature,
-      newBalance: ledger.getBalance(address),
+      newBalance: await ledger.getBalance(req.address),
     });
   } catch (e) {
     res.status(500).json({ error: String(e.message || e) });
@@ -119,10 +142,23 @@ app.post("/withdraw-auth", async (req, res) => {
 });
 
 // ---- arranque ----
-server.listen(config.port, async () => {
+async function start() {
+  try {
+    await initDb();
+    console.log("   🗄  Base de datos lista (Postgres).");
+  } catch (e) {
+    console.error("\n❌ No se pudo conectar a Postgres. Revisa DATABASE_URL.\n", e.message, "\n");
+    process.exit(1);
+  }
+  startAuthGc();
+  server.listen(config.port, onListening);
+}
+
+async function onListening() {
   console.log(`\n💧 WaterGame server en http://localhost:${config.port}`);
   console.log(`   Operator: ${operator.address}`);
   console.log(`   Bank:     ${config.bankAddress}`);
+  console.log(`   SIWE:     login con wallet ${config.siweDomain ? `(dominio: ${config.siweDomain})` : "(⚠ SIWE_DOMAIN sin configurar)"}`);
   try {
     const ok = await checkOperator();
     if (ok) console.log("   ✅ El operator del contrato coincide con esta clave.\n");
@@ -130,4 +166,6 @@ server.listen(config.port, async () => {
   } catch (e) {
     console.log("   ⚠ No se pudo verificar el operator on-chain:", e.message, "\n");
   }
-});
+}
+
+start();
