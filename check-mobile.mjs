@@ -1,0 +1,10 @@
+const t = Date.now();
+const html = await (await fetch("https://watergamecrashgame.netlify.app/index.html?t=" + t)).text();
+const hasMobileQuery = /max-width:\s*479px/.test(html);
+const hasPageScroll = /#stage\s*\{\s*height:\s*auto/.test(html) || /max-width:\s*479px[\s\S]*#stage\s*\{[^}]*overflow:\s*visible/.test(html);
+const hasFeedFix = /max-width:\s*479px[\s\S]*\.wg-feed-list\s*\{\s*max-height:\s*none/.test(html);
+console.log("\nindex.html en Netlify:");
+console.log("  media query móvil (max-width:479px):", hasMobileQuery ? "✅ presente" : "❌ NO está (sigue versión vieja)");
+console.log("  feed-list sin tope de alto en móvil :", hasFeedFix ? "✅" : "⚠️ revisar");
+console.log("");
+console.log(hasMobileQuery ? "✅ La versión nueva está publicada. Probá en el celu (cerrá y reabrí la pestaña)." : "❌ Todavía está la versión vieja — recargá/republica.");

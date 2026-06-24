@@ -7,7 +7,7 @@ import { config } from "./config.js";
 import { ledger } from "./ledger.js";
 import { initDb } from "./db.js";
 import { GameEngine } from "./gameEngine.js";
-import { readDeposited, readWithdrawn, signWithdraw, checkOperator, operator } from "./signer.js";
+import { readDeposited, readWithdrawn, readContractBalance, signWithdraw, checkOperator, operator } from "./signer.js";
 import { issueNonce, verifyLogin, resolveSession, requireAuth, startAuthGc } from "./auth.js";
 
 const app = express();
@@ -151,6 +151,70 @@ app.post("/withdraw-auth", requireAuth, async (req, res) => {
     });
   } catch (e) {
     res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
+// ---- Admin: reporte de caja (cuánto es ganancia vs. cuánto se les debe a los jugadores) ----
+// Protegido con ADMIN_SECRET. Abrir en el navegador:
+//   https://watergame-server.onrender.com/admin/liabilities?key=TU_ADMIN_SECRET
+const f2 = (n) => Number(n).toFixed(2);
+function liabilitiesPage(d) {
+  const warn = d.undercollateralized
+    ? `<div class="card bad"><b>⚠ ALERTA:</b> el contrato tiene MENOS USDC ($${f2(d.contractBalance)}) que lo que se les debe a los jugadores ($${f2(d.totalOwed)}). NO retires nada y revisá esto.</div>`
+    : "";
+  return `<!doctype html><html lang="es"><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>WaterGame — Caja</title><style>
+body{font-family:system-ui,sans-serif;background:#0f1720;color:#e8f0f5;margin:0;padding:24px;}
+.wrap{max-width:520px;margin:0 auto;}
+h1{font-size:20px;margin:0 0 4px;} .sub{color:#8aa;font-size:13px;margin-bottom:20px;}
+.card{background:#16212c;border:1px solid #243441;border-radius:14px;padding:16px 18px;margin-bottom:12px;}
+.row{display:flex;justify-content:space-between;align-items:baseline;padding:6px 0;}
+.row .lbl{color:#9bb;} .row .val{font-weight:700;font-size:18px;}
+.big{font-size:26px;} .aqua{color:#5ed9d0;} .green{color:#5fd38a;} .muted{color:#8aa;font-size:12px;}
+.bad{border-color:#a33;background:#2a1717;color:#f3b0b0;}
+.hi{background:#13261f;border-color:#1f5a40;}
+code{background:#0b1117;padding:2px 6px;border-radius:6px;}
+</style></head><body><div class="wrap">
+<h1>💧 WaterGame — Estado de la caja</h1>
+<div class="sub">Jugadores con saldo: ${d.players} · actualizado al abrir</div>
+${warn}
+<div class="card">
+  <div class="row"><span class="lbl">USDC en el contrato (la caja)</span><span class="val">$${f2(d.contractBalance)}</span></div>
+  <div class="row"><span class="lbl">Le debés a los jugadores</span><span class="val">$${f2(d.totalOwed)}</span></div>
+  <div class="row"><span class="lbl">Excedente (ganancia bruta)</span><span class="val aqua">$${f2(d.surplus)}</span></div>
+</div>
+<div class="card hi">
+  <div class="row"><span class="lbl">Colchón recomendado (reserva)</span><span class="val">$${f2(d.recommendedBuffer)}</span></div>
+  <div class="row"><span class="lbl">✅ Podés retirar con tranquilidad</span><span class="val big green">$${f2(d.safeToWithdraw)}</span></div>
+  <div class="muted" style="margin-top:8px">Dejamos un colchón del ${Math.round(d.bufferPct*100)}% del excedente por si un jugador gana fuerte. La caja siempre tiene que poder pagarle a todos.</div>
+</div>
+<div class="card">
+  <div class="muted">Para retirar esos <b>$${f2(d.safeToWithdraw)}</b>:<br/>
+  1) En tu PC: <code>node gen-housewithdraw.mjs ${f2(d.safeToWithdraw)}</code><br/>
+  2) Pegá el Data hex en el Safe (2-de-3) → Transaction Builder → Custom data → firmá con 2 llaves → ejecutá.</div>
+</div>
+</div></body></html>`;
+}
+
+app.get("/admin/liabilities", async (req, res) => {
+  if (!config.adminSecret) return res.status(503).send("Falta configurar ADMIN_SECRET en el servidor.");
+  const hdr = req.headers.authorization || "";
+  const key = req.query.key || (hdr.startsWith("Bearer ") ? hdr.slice(7) : null);
+  if (key !== config.adminSecret) return res.status(401).send("No autorizado. Agregá ?key=TU_ADMIN_SECRET a la URL.");
+  try {
+    const { totalOwed, players } = await ledger.totals();
+    const contractBalance = await readContractBalance();
+    const surplus = Math.max(0, contractBalance - totalOwed);
+    const bufferPct = Number(process.env.HOUSE_BUFFER_PCT || 0.25);
+    const recommendedBuffer = surplus * bufferPct;
+    const safeToWithdraw = Math.max(0, surplus - recommendedBuffer);
+    const undercollateralized = contractBalance < totalOwed - 1e-9;
+    const data = { contractBalance, totalOwed, players, surplus, recommendedBuffer, safeToWithdraw, bufferPct, undercollateralized };
+    if (req.query.format === "json") return res.json(data);
+    res.send(liabilitiesPage(data));
+  } catch (e) {
+    res.status(500).send("Error: " + String(e.message || e));
   }
 });
 

@@ -23,6 +23,8 @@ export const config = {
   // Dominio esperado en el login SIWE (anti-phishing). Ej: "watergame.netlify.app".
   // Si se deja vacío no se valida el dominio (recomendado configurarlo en producción).
   siweDomain: process.env.SIWE_DOMAIN || "",
+  // Clave para la página de admin (/admin/liabilities). Si está vacía, la página se desactiva.
+  adminSecret: process.env.ADMIN_SECRET || "",
   port: Number(process.env.PORT || 8787),
   decimals: Number(process.env.TOKEN_DECIMALS || 6),
 };

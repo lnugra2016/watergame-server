@@ -21,7 +21,18 @@ const BANK_ABI = [
 
 const bank = getContract({ address: config.bankAddress, abi: BANK_ABI, client: publicClient });
 
+const TOKEN_ABI = [
+  { type: "function", name: "balanceOf", stateMutability: "view", inputs: [{ name: "a", type: "address" }], outputs: [{ type: "uint256" }] },
+];
+const tokenContract = getContract({ address: config.tokenAddress, abi: TOKEN_ABI, client: publicClient });
+
 const SCALE = 10 ** config.decimals;
+
+// Lee cuánto USDC tiene el contrato (la caja) en total (en unidades del token)
+export async function readContractBalance() {
+  const raw = await tokenContract.read.balanceOf([config.bankAddress]);
+  return Number(raw) / SCALE;
+}
 
 // Lee cuánto ha depositado un usuario en el contrato (en unidades del token)
 export async function readDeposited(address) {

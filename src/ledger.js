@@ -14,6 +14,14 @@ const r6 = (n) => Math.round(Number(n) * 1e6) / 1e6;
 const num = (v) => (v == null ? 0 : Number(v));
 
 export const ledger = {
+  // Suma de TODOS los saldos de juego = lo que la casa le debe a los jugadores (liabilities).
+  async totals() {
+    const { rows } = await db.query(
+      "SELECT COALESCE(SUM(balance), 0) AS total, COUNT(*) AS n FROM players"
+    );
+    return { totalOwed: num(rows[0].total), players: Number(rows[0].n) };
+  },
+
   async getBalance(addr) {
     const { rows } = await db.query(
       "SELECT balance FROM players WHERE address = $1",

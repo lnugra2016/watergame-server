@@ -95,6 +95,12 @@ async function main() {
   assert.equal(await ledger.getBalance(B), 20);
   ok("apuestas concurrentes no sobregiran (atomicidad)");
 
+  // 13) totals() suma todos los saldos (= lo que se les debe a los jugadores)
+  const tot = await ledger.totals();
+  assert.equal(tot.players, 2);
+  assert.equal(tot.totalOwed, 190.111111); // A 170.111111 + B 20
+  ok("totals() suma los saldos de todos (liabilities)");
+
   await db.pool.end?.();
   console.log(`\n  ${passed} pruebas OK ✅\n`);
 }
